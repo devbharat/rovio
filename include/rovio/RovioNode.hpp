@@ -113,8 +113,8 @@ class RovioNode{
     #ifndef NDEBUG
       ROS_WARN("====================== Debug Mode ======================");
     #endif
-    subImu_ = nh_.subscribe("imu0", 1000, &RovioNode::imuCallback,this);
-    subImg0_ = nh_.subscribe("cam0/image_raw", 1000, &RovioNode::imgCallback0,this);
+    subImu_ = nh_.subscribe("/iris/imu", 1000, &RovioNode::imuCallback,this);
+    subImg0_ = nh_.subscribe("/iris/camera_downward/image_raw", 1000, &RovioNode::imgCallback0,this);
     subImg1_ = nh_.subscribe("cam1/image_raw", 1000, &RovioNode::imgCallback1,this);
     subGroundtruth_ = nh_.subscribe("vrpn_client/pose", 1000, &RovioNode::groundtruthCallback,this);
     pubPose_ = nh_.advertise<geometry_msgs::PoseStamped>("rovio/pose", 1);
