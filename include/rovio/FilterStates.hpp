@@ -72,12 +72,13 @@ class StateAuxiliary: public LWF::AuxiliaryBase<StateAuxiliary<nMax,nLevels,patc
       qCM_[i].setIdentity();
       MrMC_[i].setZero();
     }
-    doPatchWarping_ = true;
+    poseMeasRot_.setIdentity();
+    poseMeasLin_.setZero();
   };
 
   /** \brief Destructor
    */
-  ~StateAuxiliary(){};
+  virtual ~StateAuxiliary(){};
 
   V3D MwWMest_;  /**<Estimated rotational rate.*/
   V3D MwWMmeas_;  /**<Measured rotational rate.*/
@@ -92,8 +93,8 @@ class StateAuxiliary: public LWF::AuxiliaryBase<StateAuxiliary<nMax,nLevels,patc
   int activeCameraCounter_;  /**<Counter for iterating through the cameras, used such that when updating a feature we always start with the camId where the feature is expressed in.*/
   double timeSinceLastInertialMotion_;  /**<Time since the IMU showed motion last.*/
   double timeSinceLastImageMotion_;  /**<Time since the Image showed motion last.*/
-  FeatureWarping warping_[nMax];  /**<FeatureWarpings.*/
-  bool doPatchWarping_; /**<Should patches be warped.*/
+  rot::RotationQuaternionPD poseMeasRot_; /**<Groundtruth attitude measurement. qMI.*/
+  Eigen::Vector3d poseMeasLin_; /**<Groundtruth position measurement. IrIM*/
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -104,14 +105,17 @@ class StateAuxiliary: public LWF::AuxiliaryBase<StateAuxiliary<nMax,nLevels,patc
  *  @tparam nLevels   - Total number of pyramid levels considered.
  *  @tparam patchSize - Edge length of the patches (in pixel). Must be a multiple of 2!
  *  @tparam nCam      - Used total number of cameras.
+ *  @tparam nPose     - Additional 6D pose in state.
  */
-template<unsigned int nMax, int nLevels, int patchSize, int nCam>
+template<unsigned int nMax, int nLevels, int patchSize, int nCam, int nPose>
 class State: public LWF::State<
 LWF::TH_multiple_elements<LWF::VectorElement<3>,4>,
 LWF::QuaternionElement,
 LWF::ArrayElement<LWF::VectorElement<3>,nCam>,
 LWF::ArrayElement<LWF::QuaternionElement,nCam>,
 LWF::ArrayElement<RobocentricFeatureElement,nMax>,
+LWF::ArrayElement<LWF::VectorElement<3>,nPose>,
+LWF::ArrayElement<LWF::QuaternionElement,nPose>,
 StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
  public:
   typedef LWF::State<
@@ -120,13 +124,16 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
       LWF::ArrayElement<LWF::VectorElement<3>,nCam>,
       LWF::ArrayElement<LWF::QuaternionElement,nCam>,
       LWF::ArrayElement<RobocentricFeatureElement,nMax>,
+      LWF::ArrayElement<LWF::VectorElement<3>,nPose>,
+      LWF::ArrayElement<LWF::QuaternionElement,nPose>,
       StateAuxiliary<nMax,nLevels,patchSize,nCam>> Base;  /**<State definition.*/
   using Base::D_;
   using Base::E_;
-  static constexpr unsigned int nMax_ = nMax;
-  static constexpr unsigned int nLevels_ = nLevels;
-  static constexpr unsigned int patchSize_ = patchSize;
-  static constexpr unsigned int nCam_ = nCam;   /**<Total number of cameras.*/
+  static constexpr int nMax_ = nMax;            /**<Max number of features.*/
+  static constexpr int nLevels_ = nLevels;      /**<Max number of image levels.*/
+  static constexpr int patchSize_ = patchSize;  /**<Patch size.*/
+  static constexpr int nCam_ = nCam;            /**<Total number of cameras.*/
+  static constexpr int nPose_ = nPose;          /**<Total number of addtional pose states.*/
   static constexpr unsigned int _pos = 0;       /**<Idx. Position Vector WrWM: Pointing from the World-Frame to the IMU-Frame, expressed in World-Coordinates.*/
   static constexpr unsigned int _vel = _pos+1;  /**<Idx. Velocity Vector MvM: Absolute velocity of the of the IMU-Frame, expressed in IMU-Coordinates.*/
   static constexpr unsigned int _acb = _vel+1;  /**<Idx. Additive bias on accelerometer.*/
@@ -135,7 +142,9 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
   static constexpr unsigned int _vep = _att+1;  /**<Idx. Position Vector MrMC: Pointing from the IMU-Frame to the Camera-Frame, expressed in IMU-Coordinates.*/
   static constexpr unsigned int _vea = _vep+1;  /**<Idx. Quaternion qCM: IMU-Coordinates to Camera-Coordinates.*/
   static constexpr unsigned int _fea = _vea+1;  /**<Idx. Robocentric feature parametrization.*/
-  static constexpr unsigned int _aux = _fea+1;  /**<Idx. Auxiliary state.*/
+  static constexpr unsigned int _pop = _fea+1;  /**<Idx. Additonial pose in state, linear part. IrIW.*/
+  static constexpr unsigned int _poa = _pop+1;  /**<Idx. Additonial pose in state, rotational part. qWI.*/
+  static constexpr unsigned int _aux = _poa+1;  /**<Idx. Auxiliary state.*/
 
   /** \brief Constructor
    */
@@ -149,8 +158,14 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
     this->template getName<_vep>() = "vep";
     this->template getName<_vea>() = "vea";
     this->template getName<_fea>() = "fea";
+    this->template getName<_pop>() = "pop";
+    this->template getName<_poa>() = "poa";
     this->template getName<_aux>() = "auxiliary";
   }
+
+  /** \brief Destructor
+   */
+  virtual ~State(){};
 
   /** \brief Initializes the feature manager pointer as far as possible
    *
@@ -160,7 +175,6 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
     for(int i=0;i<nMax;i++){
       mpFeatureManager[i]->mpCoordinates_ = &CfP(i);
       mpFeatureManager[i]->mpDistance_ = &dep(i);
-      mpFeatureManager[i]->mpWarping_ = &aux().warping_[i];
     }
   }
 
@@ -172,13 +186,8 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
     for(int i=0;i<nMax;i++){
       fsm.features_[i].mpCoordinates_ = &CfP(i);
       fsm.features_[i].mpDistance_ = &dep(i);
-      fsm.features_[i].mpWarping_ = &aux().warping_[i];
     }
   }
-
-  /** \brief Destructor
-   */
-  ~State(){};
 
   //@{
   /** \brief Get/Set the position vector pointing from the World-Frame to the IMU-Frame, expressed in World-Coordinates (World->IMU, expressed in World).
@@ -252,9 +261,11 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
    *  @return a reference to the feature coordinates of feature i.
    */
   inline FeatureCoordinates& CfP(const int i = 0) {
+    assert(i<nMax_);
     return this->template get<_fea>(i).coordinates_;
   }
   inline const FeatureCoordinates& CfP(const int i = 0) const{
+    assert(i<nMax_);
     return this->template get<_fea>(i).coordinates_;
   }
   //@}
@@ -266,6 +277,7 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
    *  @return a reference to the quaternion qCM (IMU Coordinates->%Camera Coordinates).
    */
   inline QPD& qCM(const int camID = 0){
+    assert(camID<nCam_);
     if(this->template get<_aux>().doVECalibration_){
           return this->template get<_vea>(camID);
         } else {
@@ -273,6 +285,7 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
         }
   }
   inline const QPD& qCM(const int camID = 0) const{
+    assert(camID<nCam_);
     if(this->template get<_aux>().doVECalibration_){
       return this->template get<_vea>(camID);
     } else {
@@ -288,6 +301,7 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
    *  @return a reference to the position vector MrMC (IMU->%Camera, expressed in IMU).
    */
   inline V3D& MrMC(const int camID = 0){
+    assert(camID<nCam_);
     if(this->template get<_aux>().doVECalibration_){
       return this->template get<_vep>(camID);
     } else {
@@ -295,6 +309,7 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
     }
   }
   inline const V3D& MrMC(const int camID = 0) const{
+    assert(camID<nCam_);
     if(this->template get<_aux>().doVECalibration_){
       return this->template get<_vep>(camID);
     } else {
@@ -310,6 +325,7 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
    *  @return the position vector WrWC (World->%Camera, expressed in World).
    */
   inline V3D WrWC(const int camID = 0) const{
+    assert(camID<nCam_);
     return this->template get<_pos>()+this->template get<_att>().rotate(MrMC(camID));
   }
 
@@ -322,6 +338,7 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
    *  @return he quaternion qCW (World Coordinates->%Camera Coordinates).
    */
   inline QPD qCW(const int camID = 0) const{
+    assert(camID<nCam_);
     return qCM(camID)*this->template get<_att>().inverted();
   }
   //@}
@@ -336,10 +353,67 @@ StateAuxiliary<nMax,nLevels,patchSize,nCam>>{
    *  @return a reference to distance parameter of the feature.
    */
   inline FeatureDistance& dep(const int i){
+    assert(i<nMax_);
     return this->template get<_fea>(i).distance_;
   }
   inline const FeatureDistance& dep(const int i) const{
+    assert(i<nMax_);
     return this->template get<_fea>(i).distance_;
+  }
+  //@}
+
+  //@{
+  /** \brief Get/Set the rotational part of the pose with index i.
+   *
+   *  @param i - Pose index
+   *  @return  a reference to the rotational part of the pose with index i.
+   */
+  inline QPD& poseRot(const int i){
+    assert(i<nPose_);
+    return this->template get<_poa>(i);
+  }
+  inline const QPD& poseRot(const int i) const{
+    assert(i<nPose_);
+    return this->template get<_poa>(i);
+  }
+  //@}
+
+  //@{
+  /** \brief Get/Set the linear part of the pose with index i.
+   *
+   *  @param i - Pose index
+   *  @return a reference to the linear part of the pose with index i.
+   */
+  inline V3D& poseLin(const int i = 0){
+    assert(i<nPose_);
+    return this->template get<_pop>(i);
+  }
+  inline const V3D& poseLin(const int i = 0) const{
+    assert(i<nPose_);
+    return this->template get<_pop>(i);
+  }
+  //@}
+
+  //@{
+  /** \brief Get the position vector pointing from the World-Frame to the Camera-Frame, expressed in World-Coordinates (World->%Camera, expressed in World).
+   *
+   *  @note - This is compute based on the external pose measurement
+   *  @return the position vector WrWC (World->%Camera, expressed in World).
+   */
+  inline V3D WrWC_ext() const{
+    return this->aux().poseMeasLin_;
+  }
+
+  //@}
+
+  //@{
+  /** \brief Get the quaternion qCW, expressing the World-Frame in Camera-Coordinates (World Coordinates->%Camera Coordinates).
+   *
+   *  @note - This is compute based on the external pose measurement
+   *  @return he quaternion qCW (World Coordinates->%Camera Coordinates).
+   */
+  inline QPD qCW_ext() const{
+    return this->aux().poseMeasRot_;
   }
   //@}
 
@@ -386,7 +460,7 @@ class PredictionMeas: public LWF::State<LWF::VectorElement<3>,LWF::VectorElement
   }
   /** \brief Destructor
    */
-  ~PredictionMeas(){};
+  virtual ~PredictionMeas(){};
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -400,12 +474,16 @@ template<typename STATE>
 class PredictionNoise: public LWF::State<LWF::TH_multiple_elements<LWF::VectorElement<3>,5>,
 LWF::ArrayElement<LWF::VectorElement<3>,STATE::nCam_>,
 LWF::ArrayElement<LWF::VectorElement<3>,STATE::nCam_>,
-LWF::ArrayElement<LWF::VectorElement<3>,STATE::nMax_>>{
+LWF::ArrayElement<LWF::VectorElement<3>,STATE::nMax_>,
+LWF::ArrayElement<LWF::VectorElement<3>,STATE::nPose_>,
+LWF::ArrayElement<LWF::VectorElement<3>,STATE::nPose_>>{
  public:
   using LWF::State<LWF::TH_multiple_elements<LWF::VectorElement<3>,5>,
       LWF::ArrayElement<LWF::VectorElement<3>,STATE::nCam_>,
       LWF::ArrayElement<LWF::VectorElement<3>,STATE::nCam_>,
-      LWF::ArrayElement<LWF::VectorElement<3>,STATE::nMax_>>::E_;
+      LWF::ArrayElement<LWF::VectorElement<3>,STATE::nMax_>,
+      LWF::ArrayElement<LWF::VectorElement<3>,STATE::nPose_>,
+      LWF::ArrayElement<LWF::VectorElement<3>,STATE::nPose_>>::E_;
   static constexpr unsigned int _pos = 0;       /**<Idx. Position Vector WrWM: Pointing from the World-Frame to the IMU-Frame, expressed in World-Coordinates.*/
   static constexpr unsigned int _vel = _pos+1;  /**<Idx. Velocity Vector MvM: Absolute velocity of the IMU-Frame, expressed in IMU-Coordinates.*/
   static constexpr unsigned int _acb = _vel+1;  /**<Idx. Additive bias on accelerometer.*/
@@ -413,12 +491,14 @@ LWF::ArrayElement<LWF::VectorElement<3>,STATE::nMax_>>{
   static constexpr unsigned int _att = _gyb+1;  /**<Idx. Quaternion qWM: IMU coordinates to World coordinates.*/
   static constexpr unsigned int _vep = _att+1;  /**<Idx. Position Vector MrMC: Pointing from the IMU-Frame to the Camera-Frame, expressed in IMU-Coordinates.*/
   static constexpr unsigned int _vea = _vep+1;  /**<Idx. Quaternion qCM: IMU-Coordinates to Camera-Coordinates.*/
-  static constexpr unsigned int _fea = _vea+1;  /**<Idx. Feature parametrizations (bearing + depth parameter), array*/
+  static constexpr unsigned int _fea = _vea+1;  /**<Idx. Feature parametrizations (bearing + depth parameter), array.*/
+  static constexpr unsigned int _pop = _fea+1;  /**<Idx. Additonial pose in state, linear part.*/
+  static constexpr unsigned int _poa = _pop+1;  /**<Idx. Additonial pose in state, rotational part.*/
 
   /** \brief Constructor
    */
   PredictionNoise(){
-    static_assert(_fea+1==E_,"Error with indices");
+    static_assert(_poa+1==E_,"Error with indices");
     this->template getName<_pos>() = "pos";
     this->template getName<_vel>() = "vel";
     this->template getName<_acb>() = "acb";
@@ -427,11 +507,13 @@ LWF::ArrayElement<LWF::VectorElement<3>,STATE::nMax_>>{
     this->template getName<_vep>() = "vep";
     this->template getName<_vea>() = "vea";
     this->template getName<_fea>() = "fea";
+    this->template getName<_pop>() = "pop";
+    this->template getName<_poa>() = "poa";
   }
 
   /** \brief Destructor
    */
-  ~PredictionNoise(){};
+  virtual ~PredictionNoise(){};
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -442,11 +524,12 @@ LWF::ArrayElement<LWF::VectorElement<3>,STATE::nMax_>>{
  *  @tparam nLevels   - Total number of pyramid levels considered.
  *  @tparam patchSize - Edge length of the patches (in pixel). Must be a multiple of 2!
  *  @tparam nCam      - Used total number of cameras.
+ *  @tparam nPose     - Additional 6D pose in state.
  */
-template<unsigned int nMax, int nLevels, int patchSize,int nCam>
-class FilterState: public LWF::FilterState<State<nMax,nLevels,patchSize,nCam>,PredictionMeas,PredictionNoise<State<nMax,nLevels,patchSize,nCam>>,0>{
+template<unsigned int nMax, int nLevels, int patchSize,int nCam,int nPose>
+class FilterState: public LWF::FilterState<State<nMax,nLevels,patchSize,nCam,nPose>,PredictionMeas,PredictionNoise<State<nMax,nLevels,patchSize,nCam,nPose>>,0>{
  public:
-  typedef LWF::FilterState<State<nMax,nLevels,patchSize,nCam>,PredictionMeas,PredictionNoise<State<nMax,nLevels,patchSize,nCam>>,0> Base;
+  typedef LWF::FilterState<State<nMax,nLevels,patchSize,nCam,nPose>,PredictionMeas,PredictionNoise<State<nMax,nLevels,patchSize,nCam,nPose>>,0> Base;
   typedef typename Base::mtState mtState;  /**<Local Filter %State Type. \see LWF::FilterState*/
   using Base::state_;  /**<Filter State. \see LWF::FilterState*/
   using Base::cov_;  /**<Filter State Covariance Matrix. \see LWF::FilterState*/
@@ -457,16 +540,12 @@ class FilterState: public LWF::FilterState<State<nMax,nLevels,patchSize,nCam>,Pr
   mutable MXD featureOutputCov_;
   cv::Mat img_[nCam];     /**<Mainly used for drawing.*/
   cv::Mat patchDrawing_;  /**<Mainly used for drawing.*/
+  int drawPB_;  /**<Size of border around patch.*/
+  int drawPS_;  /**<Size of patch with border for drawing.*/
   double imgTime_;        /**<Time of the last image, which was processed.*/
   int imageCounter_;      /**<Total number of images, used so far for updates. Same as total number of update steps.*/
   ImagePyramid<nLevels> prevPyr_[nCam]; /**<Previous image pyramid.*/
-  rot::RotationQuaternionPD groundtruth_qCJ_; /**<Groundtruth attitude measurement.*/
-  rot::RotationQuaternionPD groundtruth_qJI_; /**<Transformtion to groundtruth inertial frame (rotation).*/
-  rot::RotationQuaternionPD groundtruth_qCB_; /**<Transformtion to groundtruth body frame (rotation).*/
-  Eigen::Vector3d groundtruth_JrJC_; /**<Groundtruth position measurement.*/
-  Eigen::Vector3d groundtruth_IrIJ_; /**<Transformtion to groundtruth inertial frame (translation).*/
-  Eigen::Vector3d groundtruth_BrBC_; /**<Transformtion to groundtruth body frame (translation).*/
-  bool plotGroundtruth_; /**<Should the groundtruth be plotted.*/
+  bool plotPoseMeas_; /**<Should the pose measurement be plotted.*/
 
   /** \brief Constructor
    */
@@ -474,16 +553,16 @@ class FilterState: public LWF::FilterState<State<nMax,nLevels,patchSize,nCam>,Pr
     usePredictionMerge_ = true;
     imgTime_ = 0.0;
     imageCounter_ = 0;
-    groundtruth_qCJ_.setIdentity();
-    groundtruth_JrJC_.setZero();
-    groundtruth_qJI_.setIdentity();
-    groundtruth_IrIJ_.setZero();
-    groundtruth_qCB_.setIdentity();
-    groundtruth_BrBC_.setZero();
-    plotGroundtruth_ = true;
+    plotPoseMeas_ = true;
     state_.initFeatureManagers(fsm_);
     fsm_.allocateMissing();
+    drawPB_ = 1;
+    drawPS_ = mtState::patchSize_*pow(2,mtState::nLevels_-1)+2*drawPB_;
   }
+
+  /** \brief Destructor
+   */
+  virtual ~FilterState(){};
 
   /** \brief Sets the multicamera pointer
    *

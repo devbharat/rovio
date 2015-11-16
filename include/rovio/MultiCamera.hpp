@@ -52,7 +52,7 @@ class MultiCamera{
       BrBC_[i].setZero();
     }
   };
-  ~MultiCamera(){};
+  virtual ~MultiCamera(){};
 
   /** \brief Sets the extrinsics of the i'th camera
    *
@@ -101,6 +101,24 @@ class MultiCamera{
       vecOut.valid_nor_ = true;
       vecOut.camID_ = i;
       vecOut.mpCamera_ = &cameras_[i];
+      vecOut.trackWarping_ = vecIn.trackWarping_;
+      vecOut.pixelCov_.setZero();
+      vecOut.eigenVector1_.setZero();
+      vecOut.eigenVector2_.setZero();
+      vecOut.sigma1_ = 0.0;
+      vecOut.sigma2_ = 0.0;
+      vecOut.sigmaAngle_ = 0.0;
+      if(vecIn.trackWarping_){ // Invalidate warping
+        vecOut.valid_warp_c_ = false;
+        vecOut.valid_warp_nor_ = false;
+        vecOut.isWarpIdentity_ = false;
+      } else {
+        vecOut.warp_c_ = vecIn.warp_c_;
+        vecOut.valid_warp_c_ = vecIn.valid_warp_c_;
+        vecOut.warp_nor_ = vecIn.warp_nor_;
+        vecOut.valid_warp_nor_ = vecIn.valid_warp_nor_;
+        vecOut.isWarpIdentity_ = vecIn.isWarpIdentity_;
+      }
     } else {
       vecOut = vecIn;
       dOut = dIn;

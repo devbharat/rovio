@@ -27,12 +27,13 @@
 */
 
 #include <ros/package.h>
+#include <rosbag/bag.h>
+#include <rosbag/view.h>
 #include <memory>
 #include "rovio/RovioFilter.hpp"
 #include "rovio/RovioNode.hpp"
-#ifdef MAKE_SCENE
-#include "rovio/RovioScene.hpp"
-#endif
+#include <boost/foreach.hpp>
+#define foreach BOOST_FOREACH
 
 #ifdef ROVIO_NMAXFEATURE
 static constexpr int nMax_ = ROVIO_NMAXFEATURE;
@@ -66,15 +67,6 @@ static constexpr int nPose_ = 0; // Additional pose states.
 
 typedef rovio::RovioFilter<rovio::FilterState<nMax_,nLevels_,patchSize_,nCam_,nPose_>> mtFilter;
 
-#ifdef MAKE_SCENE
-static rovio::RovioScene<mtFilter> mRovioScene;
-
-void idleFunc(){
-  ros::spinOnce();
-  mRovioScene.drawScene(mRovioScene.mpFilter_->safe_);
-}
-#endif
-
 int main(int argc, char** argv){
   ros::init(argc, argv, "rovio");
   ros::NodeHandle nh;
@@ -103,16 +95,42 @@ int main(int argc, char** argv){
   rovio::RovioNode<mtFilter> rovioNode(nh, nh_private, mpFilter);
   rovioNode.makeTest();
 
-#ifdef MAKE_SCENE
-  // Scene
-  std::string mVSFileName = rootdir + "/shaders/shader.vs";
-  std::string mFSFileName = rootdir + "/shaders/shader.fs";
-  mRovioScene.initScene(argc,argv,mVSFileName,mFSFileName,mpFilter);
-  mRovioScene.setIdleFunction(idleFunc);
-  mRovioScene.addKeyboardCB('r',[&rovioNode]() mutable {rovioNode.isInitialized_=false;});
-  glutMainLoop();
-#else
-  ros::spin();
-#endif
+  rosbag::Bag bag;
+  std::string rosbag_filename = "dataset.bag";
+  nh_private.param("rosbag_filename", rosbag_filename, rosbag_filename);
+  bag.open(rosbag_filename, rosbag::bagmode::Read);
+
+  std::vector<std::string> topics;
+  std::string imu_topic_name = "/imu0";
+  nh_private.param("imu_topic_name", imu_topic_name, imu_topic_name);
+  std::string cam0_topic_name = "/cam0/image_raw";
+  nh_private.param("cam0_topic_name", cam0_topic_name, cam0_topic_name);
+  std::string cam1_topic_name = "/cam1/image_raw";
+  nh_private.param("cam1_topic_name", cam1_topic_name, cam1_topic_name);
+  topics.push_back(std::string(imu_topic_name));
+  topics.push_back(std::string(cam0_topic_name));
+  topics.push_back(std::string(cam1_topic_name));
+
+  rosbag::View view(bag, rosbag::TopicQuery(topics));
+
+  foreach(rosbag::MessageInstance const msg, view){
+    if(msg.getTopic() == imu_topic_name){
+      sensor_msgs::Imu::ConstPtr imuMsg = msg.instantiate<sensor_msgs::Imu>();
+      if (imuMsg != NULL) rovioNode.imuCallback(imuMsg);
+    }
+    if(msg.getTopic() == cam0_topic_name){
+      sensor_msgs::ImageConstPtr imgMsg = msg.instantiate<sensor_msgs::Image>();
+      if (imgMsg != NULL) rovioNode.imgCallback0(imgMsg);
+    }
+    if(msg.getTopic() == cam1_topic_name){
+      sensor_msgs::ImageConstPtr imgMsg = msg.instantiate<sensor_msgs::Image>();
+      if (imgMsg != NULL) rovioNode.imgCallback1(imgMsg);
+    }
+    ros::spinOnce();
+  }
+
+  bag.close();
+
+
   return 0;
 }

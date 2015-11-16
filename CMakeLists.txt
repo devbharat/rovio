@@ -1,6 +1,10 @@
 cmake_minimum_required (VERSION 2.6)
 project(rovio)
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x -march=native")
+set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DROVIO_NMAXFEATURE=25")
+set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DROVIO_NCAM=1")
+
+add_subdirectory(lightweight_filtering)
 
 ##################### Find, include, and compile library #####################
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
@@ -55,6 +59,7 @@ find_package(catkin REQUIRED COMPONENTS
 	sensor_msgs
 	std_msgs
 	tf
+	rosbag
 )
 
 add_message_files(
@@ -83,19 +88,24 @@ catkin_package(
 	sensor_msgs
 	std_msgs
 	tf
+	rosbag
 )
 
 include_directories(include ${catkin_INCLUDE_DIRS} ${YamlCpp_INCLUDE_DIRS})
 
-add_library(${PROJECT_NAME} src/test_rovio.cpp)
+if(MAKE_SCENE)
+	add_library(${PROJECT_NAME} src/rovio_node.cpp src/Camera.cpp src/FeatureCoordinates.cpp src/FeatureDistance.cpp src/Scene.cpp)
+else()
+	add_library(${PROJECT_NAME} src/rovio_node.cpp src/Camera.cpp src/FeatureCoordinates.cpp src/FeatureDistance.cpp)
+endif()
 target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES} ${YamlCpp_LIBRARIES} ${OpenMP_EXE_LINKER_FLAGS} ${OPENGL_LIBRARIES} ${GLUT_LIBRARY} ${GLEW_LIBRARY})
 add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS})
 
-add_executable(test_rovio src/test_rovio.cpp)
-target_link_libraries(test_rovio ${PROJECT_NAME})
-
 add_executable(rovio_node src/rovio_node.cpp)
 target_link_libraries(rovio_node ${PROJECT_NAME})
+
+add_executable(rovio_rosbag_loader src/rovio_rosbag_loader.cpp)
+target_link_libraries(rovio_rosbag_loader ${PROJECT_NAME})
 
 add_executable(feature_tracker_node src/feature_tracker_node.cpp)
 target_link_libraries(feature_tracker_node ${PROJECT_NAME})
@@ -106,10 +116,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/gtest/")
 	#add_subdirectory(gtest gtest)
 	enable_testing()
 	include_directories(${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR})
-	add_executable(test_patch src/test_patch.cpp)
-	target_link_libraries(test_patch gtest_main gtest pthread ${catkin_LIBRARIES})
+	add_executable(test_patch src/test_patch.cpp src/Camera.cpp src/FeatureCoordinates.cpp src/FeatureDistance.cpp)
+	target_link_libraries(test_patch gtest_main gtest pthread ${catkin_LIBRARIES} ${YamlCpp_LIBRARIES})
 	add_test(test_patch test_patch)
-	add_executable(test_mlp src/test_mlp.cpp)
-	target_link_libraries(test_mlp gtest_main gtest pthread ${catkin_LIBRARIES})
+	add_executable(test_mlp src/test_mlp.cpp src/Camera.cpp src/FeatureCoordinates.cpp src/FeatureDistance.cpp)
+	target_link_libraries(test_mlp gtest_main gtest pthread ${catkin_LIBRARIES} ${YamlCpp_LIBRARIES})
 	add_test(test_mlp test_mlp)
 endif()

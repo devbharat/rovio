@@ -55,6 +55,7 @@ class ImuPrediction: public LWF::Prediction<FILTERSTATE>{
   double inertialMotionAccTh_; /**<Threshold on the acceleration for motion detection.*/
   mutable FeatureCoordinates oldC_;
   mutable FeatureDistance oldD_;
+  mutable Eigen::Matrix2d bearingVectorJac_;
   ImuPrediction():g_(0,0,-9.81){
     int ind;
     inertialMotionRorTh_ = 0.1;
@@ -71,9 +72,27 @@ class ImuPrediction: public LWF::Prediction<FILTERSTATE>{
       doubleRegister_.removeScalarByVar(prenoiP_(ind,ind));
       doubleRegister_.registerScalar("PredictionNoise.dep",prenoiP_(ind,ind));
     }
+    for(int camID=0;camID<mtState::nCam_;camID++){
+      for(int j=0;j<3;j++){
+        doubleRegister_.removeScalarByVar(prenoiP_(mtNoise::template getId<mtNoise::_vep>(camID)+j,mtNoise::template getId<mtNoise::_vep>(camID)+j));
+        doubleRegister_.removeScalarByVar(prenoiP_(mtNoise::template getId<mtNoise::_vea>(camID)+j,mtNoise::template getId<mtNoise::_vea>(camID)+j));
+        doubleRegister_.registerScalar("PredictionNoise.vep",prenoiP_(mtNoise::template getId<mtNoise::_vep>(camID)+j,mtNoise::template getId<mtNoise::_vep>(camID)+j));
+        doubleRegister_.registerScalar("PredictionNoise.vea",prenoiP_(mtNoise::template getId<mtNoise::_vea>(camID)+j,mtNoise::template getId<mtNoise::_vea>(camID)+j));
+      }
+    }
+    for(int i=0;i<mtState::nPose_;i++){
+      for(int j=0;j<3;j++){
+        doubleRegister_.removeScalarByVar(prenoiP_(mtNoise::template getId<mtNoise::_pop>(i)+j,mtNoise::template getId<mtNoise::_pop>(i)+j));
+        doubleRegister_.removeScalarByVar(prenoiP_(mtNoise::template getId<mtNoise::_poa>(i)+j,mtNoise::template getId<mtNoise::_poa>(i)+j));
+      }
+    }
     disablePreAndPostProcessingWarning_ = true;
   };
-  ~ImuPrediction(){};
+
+  /** \brief Destructor
+   */
+  virtual ~ImuPrediction(){};
+
   /* /brief Evaluation of prediction
    *
    * @todo implement without noise for speed
@@ -84,12 +103,12 @@ class ImuPrediction: public LWF::Prediction<FILTERSTATE>{
     const V3D imuRor = output.aux().MwWMest_+noise.template get<mtNoise::_att>()/sqrt(dt);
     const V3D dOmega = dt*imuRor;
     QPD dQ = dQ.exponentialMap(-dOmega);
-    LWF::NormalVectorElement tempNormal;
-    BearingCorners bearingCornerOut;
     for(unsigned int i=0;i<mtState::nMax_;i++){
       const int camID = state.CfP(i).camID_;
-      output.CfP(i).mpCamera_ = state.CfP(i).mpCamera_;
-      output.CfP(i).camID_ = state.CfP(i).camID_;
+      if(&output != &state){
+        output.CfP(i) = state.CfP(i);
+        output.dep(i) = state.dep(i);
+      }
       if(camID >= 0 && camID < mtState::nCam_){
         const V3D camRor = state.qCM(camID).rotate(imuRor);
         const V3D camVel = state.qCM(camID).rotate(V3D(imuRor.cross(state.MrMC(camID))-state.MvM()));
@@ -102,22 +121,13 @@ class ImuPrediction: public LWF::Prediction<FILTERSTATE>{
         QPD qm = qm.exponentialMap(dm);
         output.CfP(i).set_nor(oldC_.get_nor().rotated(qm));
         // WARP corners
-        if(state.aux().doPatchWarping_){
-          for(unsigned int j=0;j<2;j++){
-            oldC_.get_nor().boxPlus(state.aux().warping_[i].get_bearingCorners(&oldC_)[j],tempNormal);
-            dm = dt*(gSM(tempNormal.getVec())*camVel/oldD_.getDistance() + (M3D::Identity()-tempNormal.getVec()*tempNormal.getVec().transpose())*camRor);
-            qm = qm.exponentialMap(dm);
-            tempNormal = tempNormal.rotated(qm);
-            tempNormal.boxMinus(output.CfP(i).get_nor(),bearingCornerOut[j]);
-          }
-          output.aux().warping_[i].set_bearingCorners(bearingCornerOut);
-        } else {
-          output.aux().warping_[i].set_affineTransfrom(Eigen::Matrix2f::Identity());
+        if(state.CfP(i).trackWarping_){
+          bearingVectorJac_ = output.CfP(i).get_nor().getM().transpose()*(dt*gSM(qm.rotate(oldC_.get_nor().getVec()))*Lmat(dm)*(
+                                  -1.0/oldD_.getDistance()*gSM(camVel)
+                                  - (M3D::Identity()*(oldC_.get_nor().getVec().dot(camRor))+oldC_.get_nor().getVec()*camRor.transpose()))
+                              +MPD(qm).matrix())*oldC_.get_nor().getM();
+          output.CfP(i).set_warp_nor(bearingVectorJac_*oldC_.get_warp_nor());
         }
-      } else {
-        output.CfP(i).set_nor(state.CfP(i).get_nor());
-        output.dep(i).p_ = 1.0;
-        output.aux().warping_[i].set_affineTransfrom(Eigen::Matrix2f::Identity());
       }
     }
     output.WrWM() = state.WrWM()-dt*(state.qWM().rotate(state.MvM())-noise.template get<mtNoise::_pos>()/sqrt(dt));
@@ -129,6 +139,11 @@ class ImuPrediction: public LWF::Prediction<FILTERSTATE>{
       output.MrMC(i) = state.MrMC(i)+noise.template get<mtNoise::_vep>(i)*sqrt(dt);
       dQ = dQ.exponentialMap(noise.template get<mtNoise::_vea>(i)*sqrt(dt));
       output.qCM(i) = dQ*state.qCM(i);
+    }
+    for(unsigned int i=0;i<mtState::nPose_;i++){
+      output.poseLin(i) = state.poseLin(i)+noise.template get<mtNoise::_pop>(i)*sqrt(dt);
+      dQ = dQ.exponentialMap(noise.template get<mtNoise::_poa>(i)*sqrt(dt));
+      output.poseRot(i) = dQ*state.poseRot(i);
     }
     output.aux().wMeasCov_ = prenoiP_.template block<3,3>(mtNoise::template getId<mtNoise::_att>(),mtNoise::template getId<mtNoise::_att>())/dt;
     output.fix();
@@ -219,6 +234,10 @@ class ImuPrediction: public LWF::Prediction<FILTERSTATE>{
       F.template block<3,3>(mtState::template getId<mtState::_vep>(i),mtState::template getId<mtState::_vep>(i)) = M3D::Identity();
       F.template block<3,3>(mtState::template getId<mtState::_vea>(i),mtState::template getId<mtState::_vea>(i)) = M3D::Identity();
     }
+    for(unsigned int i=0;i<mtState::nPose_;i++){
+      F.template block<3,3>(mtState::template getId<mtState::_pop>(i),mtState::template getId<mtState::_pop>(i)) = M3D::Identity();
+      F.template block<3,3>(mtState::template getId<mtState::_poa>(i),mtState::template getId<mtState::_poa>(i)) = M3D::Identity();
+    }
   }
   void jacNoise(MXD& G, const mtState& state, double dt) const{
     const V3D imuRor = meas_.template get<mtMeas::_gyr>()-state.gyb();
@@ -233,6 +252,10 @@ class ImuPrediction: public LWF::Prediction<FILTERSTATE>{
     for(unsigned int i=0;i<mtState::nCam_;i++){
       G.template block<3,3>(mtState::template getId<mtState::_vep>(i),mtNoise::template getId<mtNoise::_vep>(i)) = M3D::Identity()*sqrt(dt);
       G.template block<3,3>(mtState::template getId<mtState::_vea>(i),mtNoise::template getId<mtNoise::_vea>(i)) = M3D::Identity()*sqrt(dt);
+    }
+    for(unsigned int i=0;i<mtState::nPose_;i++){
+      G.template block<3,3>(mtState::template getId<mtState::_pop>(i),mtNoise::template getId<mtNoise::_pop>(i)) = M3D::Identity()*sqrt(dt);
+      G.template block<3,3>(mtState::template getId<mtState::_poa>(i),mtNoise::template getId<mtNoise::_poa>(i)) = M3D::Identity()*sqrt(dt);
     }
     LWF::NormalVectorElement nOut;
     for(unsigned int i=0;i<mtState::nMax_;i++){
